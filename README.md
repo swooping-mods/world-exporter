@@ -1,5 +1,7 @@
 # World Exporter
 
+<img src="media/icon.png" alt="World Exporter icon" width="128" height="128">
+
 Companion tool: export and verify complete last-saved world slots.
 
 ## Install
