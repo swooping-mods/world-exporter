@@ -1,0 +1,9 @@
+{
+  "id": "world-exporter",
+  "version": "0.1.0",
+  "kind": "companion",
+  "entry_module": "world_exporter.__main__",
+  "backlog_id": "M04",
+  "feature_dependencies": [],
+  "description": "Export complete native saved-world slots into verifiable portable archives."
+}

@@ -1,0 +1,17 @@
+{
+  "schema": "mod-source-hashes/v1",
+  "source_files": {
+    "mods/world-exporter/mod.json": {
+      "export_sha256": "e77952cdbdf2a90fe82edb200bca3e55818ea4fd7758a7adad7ed55ce797bfbd"
+    },
+    "mods/world-exporter/world_exporter/__init__.py": {
+      "export_sha256": "5a1f24c14603f969ff300000c32960c5c38f87dd95010ae34b17027d98dbfbc6"
+    },
+    "mods/world-exporter/world_exporter/__main__.py": {
+      "export_sha256": "fbec33bb420895b5ffc751aacbb22ae38f0098c52990ebad1dfeda06f70cd997"
+    },
+    "mods/world-exporter/world_exporter/archive.py": {
+      "export_sha256": "861617e44903d42b86368388c7607bb743857e2c1a7664f6591e3e00adc57270"
+    }
+  }
+}

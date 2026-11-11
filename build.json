@@ -1,0 +1,5 @@
+{
+  "schema": "moon-independent-build-spec/v1",
+  "id": "world-exporter",
+  "kind": "companion"
+}
