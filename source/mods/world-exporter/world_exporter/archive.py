@@ -1,5 +1,6 @@
 """Lossless saved-slot snapshots with bounded verification and no source writes."""
 from dataclasses import dataclass
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -18,6 +19,8 @@ MAX_TOTAL = 8 * 1024 ** 3
 MAX_FILE = 4 * 1024 ** 3
 MAX_MANIFEST = 8 * 1024 ** 2
 CHUNK = 1024 ** 2
+NOFOLLOW_SOURCE = (os.open in os.supports_dir_fd and os.scandir in os.supports_fd
+                   and hasattr(os, 'O_NOFOLLOW') and hasattr(os, 'O_DIRECTORY'))
 
 
 class ExportError(ValueError):
@@ -78,7 +81,89 @@ class Snapshot:
     total_bytes: int
 
 
+@dataclass(frozen=True)
+class ProfileSource:
+    path: Path
+    descriptor: int
+
+    def check(self):
+        # Keep the validated name bound to the pinned directory. Neither an
+        # alias swap nor a real replacement directory may adopt another source.
+        with source_handle(self.path, directory=True) as current:
+            actual, expected = os.fstat(current), os.fstat(self.descriptor)
+            if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+                raise SourceChanged('Validated profile directory was replaced')
+
+
+@dataclass(frozen=True)
+class SlotSource:
+    path: Path
+    profile: ProfileSource
+
+    def __fspath__(self):
+        return os.fspath(self.path)
+
+
+@contextmanager
+def open_profile(path, policy=None):
+    """Canonicalize once, enforce the frozen policy path, then pin the source."""
+    if isinstance(path, ProfileSource):
+        path.check()
+        yield path
+        return
+    canonical = Path(path).expanduser().resolve(strict=True)
+    if policy is not None:
+        # Managed settings record an already canonical prefix. Resolving this
+        # name again would trust a newly installed cross-storefront symlink.
+        root = Path(policy['profile_root'])
+        if not root.is_absolute() or '..' in root.parts:
+            raise ExportError('Save separation policy requires a canonical absolute profile prefix')
+        relative = canonical.relative_to(root).parts if canonical.is_relative_to(root) else ()
+        if len(relative) != 5 or relative[1:] != ('AppData', 'LocalLow', 'DragDropGames', 'MoonSweepers'):
+            raise ExportError('Save separation: choose the ' + policy['storefront'] + ' profile from this lane\'s own prefix')
+    with source_handle(canonical, directory=True) as descriptor:
+        profile = ProfileSource(canonical, descriptor)
+        profile.check()
+        yield profile
+
+
+@contextmanager
+def source_handle(path, *, directory=False, profile=None):
+    # Anchor every component, not only the leaf: O_NOFOLLOW on a save file
+    # alone still follows a directory replaced by a symlink during a save.
+    if not NOFOLLOW_SOURCE:
+        raise ExportError('Safe source traversal requires directory handles and no-follow support on this platform')
+    path = Path(path).absolute()
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY | getattr(os, 'O_CLOEXEC', 0)
+    if profile is not None:
+        profile.check()
+        try:
+            parts = path.relative_to(profile.path).parts
+        except ValueError as error:
+            raise ExportError('Source traversal escaped the validated profile') from error
+        descriptor = os.dup(profile.descriptor)
+    else:
+        parts = path.parts[1:]
+        descriptor = os.open(path.anchor, flags)
+    try:
+        for index, part in enumerate(parts):
+            if part in ('.', '..'):
+                raise ExportError('Noncanonical source traversal component')
+            leaf = index == len(parts) - 1
+            mode = flags if directory or not leaf else (
+                os.O_RDONLY | os.O_NOFOLLOW | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_CLOEXEC', 0))
+            next_descriptor = os.open(part, mode, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
 def scan(root):
+    profile = root.profile if isinstance(root, SlotSource) else None
+    if profile is not None:
+        profile.check()
     root = Path(root)
     if root.is_symlink() or not root.is_dir():
         raise ExportError('Saved slot must be a regular directory')
@@ -91,39 +176,41 @@ def scan(root):
         folder, depth = pending.pop()
         if depth > 64:
             raise ExportError('Save directory nesting exceeds the supported bound')
-        with os.scandir(folder) as entries:
-            entries = sorted(entries, key=lambda x: x.name)
-        for entry in entries:
-            path = Path(entry.path)
-            name = safe_name(path.relative_to(root).as_posix())
-            if name.casefold() in folded:
-                raise ExportError('Case-insensitive path collision: ' + name)
-            folded.add(name.casefold())
-            info = entry.stat(follow_symlinks=False)
-            if stat.S_ISLNK(info.st_mode):
-                raise ExportError('Symlinks are not saved-world payloads: ' + name)
-            if stat.S_ISDIR(info.st_mode):
-                directories.append(name)
-                pending.append((path, depth + 1))
-            elif stat.S_ISREG(info.st_mode):
-                if info.st_size > MAX_FILE:
-                    raise ExportError('Save file exceeds the supported bound: ' + name)
-                files[name] = signature(info)
-                total += info.st_size
-            else:
-                raise ExportError('Special file refused: ' + name)
-            if len(folded) > MAX_FILES or total > MAX_TOTAL:
-                raise ExportError('Saved slot exceeds the export size/file bound')
+        with source_handle(folder, directory=True, profile=profile) as descriptor, os.scandir(descriptor) as entries:
+            for entry in entries:
+                path = folder / entry.name
+                name = safe_name(path.relative_to(root).as_posix())
+                if name.casefold() in folded:
+                    raise ExportError('Case-insensitive path collision: ' + name)
+                folded.add(name.casefold())
+                info = entry.stat(follow_symlinks=False)
+                if stat.S_ISLNK(info.st_mode):
+                    raise ExportError('Symlinks are not saved-world payloads: ' + name)
+                if stat.S_ISDIR(info.st_mode):
+                    directories.append(name)
+                    pending.append((path, depth + 1))
+                elif stat.S_ISREG(info.st_mode):
+                    if info.st_size > MAX_FILE:
+                        raise ExportError('Save file exceeds the supported bound: ' + name)
+                    files[name] = signature(info)
+                    total += info.st_size
+                else:
+                    raise ExportError('Special file refused: ' + name)
+                if len(folded) > MAX_FILES or total > MAX_TOTAL:
+                    raise ExportError('Saved slot exceeds the export size/file bound')
     return Snapshot(files=dict(sorted(files.items())), directories=tuple(sorted(directories)), total_bytes=total)
 
 
 def locate_slot(profile, name):
-    profile = Path(profile).expanduser().resolve(strict=True)
+    pinned = profile if isinstance(profile, ProfileSource) else None
+    profile = pinned.path if pinned is not None else Path(profile).expanduser().resolve(strict=True)
+    if pinned is not None:
+        pinned.check()
     sessions = profile / 'MoonSessions'
     slot = sessions / slot_name(name)
     if sessions.is_symlink() or slot.is_symlink():
         raise ExportError('MoonSessions and slot directories must not be symlinks')
-    return profile, slot
+    return profile, SlotSource(slot, pinned) if pinned is not None else slot
 
 
 def require_world(snapshot):
@@ -132,23 +219,24 @@ def require_world(snapshot):
 
 
 def list_slots(profile):
-    profile = Path(profile).expanduser().resolve(strict=True)
-    sessions = profile / 'MoonSessions'
-    if sessions.is_symlink():
-        raise ExportError('MoonSessions must not be a symlink')
-    if not sessions.is_dir():
-        return []
-    result = []
-    for folder in sorted(sessions.iterdir()):
-        if not re.fullmatch(r'slot-[0-9]+', folder.name):
-            continue
+    with open_profile(profile) as pinned:
+        sessions = pinned.path / 'MoonSessions'
         try:
-            snapshot = scan(folder)
-            require_world(snapshot)
-            result.append(dict(slot=folder.name, files=len(snapshot.files), bytes=snapshot.total_bytes, state='saved-world'))
-        except (ExportError, OSError) as error:
-            result.append(dict(slot=folder.name, state='unavailable', error=str(error)))
-    return result
+            with source_handle(sessions, directory=True, profile=pinned) as descriptor, os.scandir(descriptor) as entries:
+                names = sorted(entry.name for entry in entries if re.fullmatch(r'slot-[0-9]+', entry.name))
+        except FileNotFoundError:
+            pinned.check()
+            return []
+        result = []
+        for name in names:
+            try:
+                snapshot = scan(SlotSource(sessions / name, pinned))
+                require_world(snapshot)
+                result.append(dict(slot=name, files=len(snapshot.files), bytes=snapshot.total_bytes, state='saved-world'))
+            except (ExportError, OSError) as error:
+                result.append(dict(slot=name, state='unavailable', error=str(error)))
+        pinned.check()
+        return result
 
 
 def output_path(profile, target, readonly_roots=()):
@@ -179,15 +267,15 @@ def payload_identity(files, directories):
 
 
 def write_snapshot(slot, snapshot, archive):
+    profile = slot.profile if isinstance(slot, SlotSource) else None
+    slot_path = Path(slot)
     rows = {}
     with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as output:
         for name in snapshot.directories:
             output.writestr(info('payload/' + name, directory=True), b'')
         for name, expected in snapshot.files.items():
-            path = slot / name
-            flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_BINARY', 0)
-            descriptor = os.open(path, flags)
-            with os.fdopen(descriptor, 'rb') as source:
+            path = slot_path / name
+            with source_handle(path, profile=profile) as descriptor, os.fdopen(descriptor, 'rb', closefd=False) as source:
                 if signature(os.fstat(source.fileno())) != expected:
                     raise SourceChanged('Save changed before copying: ' + name)
                 hasher = hashlib.sha256()
@@ -206,7 +294,7 @@ def write_snapshot(slot, snapshot, archive):
             raise SourceChanged('Saved slot changed during export')
         data = dict(schema=SCHEMA, game='Moon Sweepers', steam_app_id=5335510,
                     exporter=dict(id='world-exporter', version=__version__),
-                    source_slot=slot.name, content='complete-native-saved-slot',
+                    source_slot=slot_path.name, content='complete-native-saved-slot',
                     files=rows, directories=list(snapshot.directories),
                     payload_sha256=payload_identity(rows, snapshot.directories))
         encoded = canonical_json(data)
@@ -299,7 +387,13 @@ def publish_file(temporary, destination):
 
 
 def export_world(profile, slot, destination, *, readonly_roots=(), attempts=3, settle_ms=250):
-    profile, source = locate_slot(profile, slot)
+    with open_profile(profile) as pinned:
+        return _export_world(pinned, slot, destination, readonly_roots=readonly_roots,
+                             attempts=attempts, settle_ms=settle_ms)
+
+
+def _export_world(pinned, slot, destination, *, readonly_roots=(), attempts=3, settle_ms=250):
+    profile, source = locate_slot(pinned, slot)
     target = output_path(profile, destination, readonly_roots)
     target.parent.mkdir(parents=True, exist_ok=True)
     if not 1 <= attempts <= 5 or not 0 <= settle_ms <= 5000:
@@ -331,6 +425,7 @@ def export_world(profile, slot, destination, *, readonly_roots=(), attempts=3, s
                           source_stable_during_snapshot=True, source_writes=False)
             # Two-file publication is recoverable, not a filesystem transaction.
             # A caught sidecar failure removes only the exact archive we own.
+            pinned.check()
             publish_file(temporary, target)
             published = True
             fd, sidecar = tempfile.mkstemp(prefix='.moon-receipt-', dir=target.parent)
@@ -344,8 +439,13 @@ def export_world(profile, slot, destination, *, readonly_roots=(), attempts=3, s
         except SourceChanged as changed:
             error = changed
         except BaseException:
-            if published and target.exists() and os.path.samefile(target, temporary):
-                target.unlink()
+            if published:
+                try:
+                    current, owned = target.lstat(), temporary.stat()
+                    if stat.S_ISREG(current.st_mode) and (current.st_dev, current.st_ino) == (owned.st_dev, owned.st_ino):
+                        target.unlink()
+                except FileNotFoundError:
+                    pass
             raise
         finally:
             temporary.unlink(missing_ok=True)

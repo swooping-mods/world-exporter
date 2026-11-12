@@ -61,6 +61,10 @@ def archive(files):
 
 
 def build(destination):
+    # A source candidate must not reuse an older package manifest as a new build.
+    source_sync = json.loads((ROOT/'provenance.json').read_text()).get('source_sync', {})
+    if source_sync.get('compiled') is False:
+        raise ValueError('Source candidate has no matching compiled-payload receipt; build/package is disabled. Use --check to verify source hashes.')
     inputs = validate_sources()
     spec = json.loads((ROOT/'build.json').read_text())
     destination = destination.absolute()

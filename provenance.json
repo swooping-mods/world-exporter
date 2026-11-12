@@ -1,17 +1,30 @@
 {
   "schema": "mod-source-hashes/v1",
+  "source_sync": {
+    "workshop_revision": "ca32bbf79ce0840d5166a232bdb3a9fdcd761254",
+    "source_version": "0.1.0",
+    "payload_version": "0.1.0",
+    "compiled": false,
+    "gameplay_requalified": false,
+    "production_closure_complete": true,
+    "deferred_test_fixture_gaps": []
+  },
   "source_files": {
     "mods/world-exporter/mod.json": {
+      "source_sha256": "e77952cdbdf2a90fe82edb200bca3e55818ea4fd7758a7adad7ed55ce797bfbd",
       "export_sha256": "e77952cdbdf2a90fe82edb200bca3e55818ea4fd7758a7adad7ed55ce797bfbd"
     },
     "mods/world-exporter/world_exporter/__init__.py": {
+      "source_sha256": "5a1f24c14603f969ff300000c32960c5c38f87dd95010ae34b17027d98dbfbc6",
       "export_sha256": "5a1f24c14603f969ff300000c32960c5c38f87dd95010ae34b17027d98dbfbc6"
     },
     "mods/world-exporter/world_exporter/__main__.py": {
-      "export_sha256": "fbec33bb420895b5ffc751aacbb22ae38f0098c52990ebad1dfeda06f70cd997"
+      "source_sha256": "90dfbcf69e0bc18f0eb28ebfa935ac43074ee7300f6f690c07b6e1477f9bdf55",
+      "export_sha256": "90dfbcf69e0bc18f0eb28ebfa935ac43074ee7300f6f690c07b6e1477f9bdf55"
     },
     "mods/world-exporter/world_exporter/archive.py": {
-      "export_sha256": "861617e44903d42b86368388c7607bb743857e2c1a7664f6591e3e00adc57270"
+      "source_sha256": "96279b27523941032ef8940f46d8a35ce83a9090e9c5972a8fd01db5c4799dab",
+      "export_sha256": "96279b27523941032ef8940f46d8a35ce83a9090e9c5972a8fd01db5c4799dab"
     }
   }
 }
